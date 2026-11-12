@@ -15,6 +15,7 @@ Rules enforced in the database (not just the screen):
 - Cancelling a shift more than 48 hours ahead posts it to the team chat. Anyone can register, first come first served, normal pay.
 - Chat shifts nobody has taken by 48 hours out move to Standby.
 - Standby is for day shifts within 48 hours only.
+- **Late opt-out alert (owner only).** When one person opts out of 3 shifts in a calendar month with under 48 hours notice (each one sent to standby), the owner gets a single alert on Home and in Shift cover, with the events, who covered, and an estimated cost. Later events update the same alert. The owner can mark an event as excused (it stops counting; the alert closes if the count falls below 3), add a note, keep watching or dismiss. The threshold and notice window are editable on the Team page. It never contacts, penalises or changes the roster or hours of anyone, and employees cannot see it. Every counted event, excuse and alert action is kept in an audit log (`late_audit`).
 
 ## 1. Create the Supabase project
 

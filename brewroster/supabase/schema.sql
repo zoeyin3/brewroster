@@ -453,12 +453,14 @@ begin
     raise exception 'That shift is already cancelled.';
   end if;
   if v_hours > 48 then v_kind := 'optout'; v_phase := 'chat'; else v_kind := 'late'; v_phase := 'standby'; end if;
-  insert into public.cover_requests (kind, phase, staff_id, day, start_h, end_h, w_from, w_to, reason, message)
-  values (v_kind, v_phase, s.staff_id, s.day, s.start_h, s.end_h, s.start_h, s.end_h, nullif(p_reason, ''), nullif(p_msg, '')) returning id into v_id;
+  insert into public.cover_requests (kind, phase, staff_id, day, start_h, end_h, w_from, w_to, reason, message, opted_out_at, notice_hours, triggered_standby, by_owner)
+  values (v_kind, v_phase, s.staff_id, s.day, s.start_h, s.end_h, s.start_h, s.end_h, nullif(p_reason, ''), nullif(p_msg, ''), public.cafe_now(), v_hours, v_phase = 'standby', p_by_owner) returning id into v_id;
   select name into v_name from public.staff where id = s.staff_id;
   if v_kind = 'optout' then
     perform public.post_chat('open', 'Open shift: ' || public.dlabel(s.day) || ', ' || public.hrange(s.start_h, s.end_h) || '. ' || split_part(v_name, ' ', 1) || ' can no longer work it. Normal pay.', v_id);
   end if;
+  -- the late opt-out alert is owner-only: nothing about it is returned to the person who opted out
+  if v_kind = 'late' then perform public._late_record_event(v_id); end if;
   return json_build_object('id', v_id, 'kind', v_kind, 'phase', v_phase);
 end $$;
 
@@ -539,7 +541,7 @@ begin
             where c.status = 'open' and c.phase = 'chat'
               and extract(epoch from ((c.day::timestamp + make_interval(hours => c.w_from)) - public.cafe_now())) / 3600.0 <= 48
             for update loop
-    update public.cover_requests set phase = 'standby' where id = r.id;
+    update public.cover_requests set phase = 'standby', triggered_standby = true where id = r.id;
     perform public.post_chat('note', 'Nobody registered for ' || public.dlabel(r.day) || ', ' || public.hrange(r.w_from, r.w_to) || '. It is now within 48 hours and has moved to Standby.', r.id);
     n := n + 1;
   end loop;
@@ -570,7 +572,7 @@ begin
   if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
   select * into c from public.cover_requests where id = p_cover;
   if not found or c.status <> 'open' then raise exception 'That shift is no longer open.'; end if;
-  if c.phase <> 'standby' then update public.cover_requests set phase = 'standby' where id = c.id; end if;
+  if c.phase <> 'standby' then update public.cover_requests set phase = 'standby', triggered_standby = true where id = c.id; end if;
   foreach sid in array p_staff loop
     insert into public.standby_alerts (cover_id, staff_id, day, from_h, to_h) values (c.id, sid, c.day, c.w_from, c.w_to) on conflict (cover_id, staff_id) do nothing;
     if found then n := n + 1; end if;
@@ -673,10 +675,14 @@ begin
   if auth.uid() is not null and not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
   if exists (select 1 from public.staff) and not p_reset then raise exception 'Sample data can only be loaded into an empty cafe. Use reset to replace what is there.'; end if;
   if p_reset then
-    delete from public.chat_messages; delete from public.standby_alerts; delete from public.cover_requests; delete from public.shifts; delete from public.rosters;
-    delete from public.leave_requests; delete from public.events; delete from public.weather; delete from public.pos_hourly;
+    -- (Supabase refuses DELETE without a WHERE clause, so every delete says "where true")
+    delete from public.chat_messages where true; delete from public.standby_alerts where true; delete from public.cover_requests where true;
+    delete from public.late_audit where true; delete from public.late_optout_alerts where true;
+    update public.late_settings set threshold = 3, window_h = 48 where id = 1;
+    delete from public.shifts where true; delete from public.rosters where true;
+    delete from public.leave_requests where true; delete from public.events where true; delete from public.weather where true; delete from public.pos_hourly where true;
     update public.profiles set staff_id = null where role = 'employee';
-    delete from public.staff;
+    delete from public.staff where true;
   end if;
   perform setseed(0.2026);
   update public.settings set cafe_name = 'Little Wren Coffee', cap = 20, min_staff = 2, lat = -33.8688, lng = 151.2093, seeded = true where id = 1;
@@ -738,6 +744,7 @@ begin
     ) as v(nm, f, t2, ty, rs, msg, sub, st)
     join public.staff s on s.name = v.nm;
 
+  perform public._seed_late_sample(t);
   return json_build_object('ok', true, 'today', t);
 end $$;
 
@@ -747,6 +754,305 @@ declare sid uuid;
 begin
   insert into public.staff (name, role_title, skills, barista, sort) values (p_name, p_role, p_skills, p_bar, p_sort) returning id into sid;
   insert into public.staff_private (staff_id, email, rate, max_hours, avail, standby_days) values (sid, p_email, p_rate, p_max, p_avail, p_sb);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 6b. Late opt-out alert (owner only)
+--
+-- Tells the owner when one person keeps opting out of shifts with under
+-- 48 hours notice, because each one forces the standby process.
+--   * It only ever informs. Nothing in this section changes a roster, sends a
+--     message, approves leave or touches anyone's hours.
+--   * Employees cannot read any of it: the tables below have an owner-only
+--     read rule and no write rules, and every action is an owner-only function.
+--   * What counts: an opt-out made with less than the notice window (default
+--     48 hours) that sent the shift to standby, per person per calendar month
+--     (the month the opt-out was made in). Excused events stay in the history
+--     but are not counted. Opt-outs with more notice, leave decided in advance,
+--     and shifts the owner changed never create one of these events.
+-- ---------------------------------------------------------------------
+
+-- what we remember about each opt-out (the rows already exist in cover_requests)
+alter table public.cover_requests add column if not exists opted_out_at      timestamp;            -- cafe time when the person opted out
+alter table public.cover_requests add column if not exists notice_hours      numeric;              -- hours between opting out and the shift start
+alter table public.cover_requests add column if not exists triggered_standby boolean not null default false;
+alter table public.cover_requests add column if not exists by_owner          boolean not null default false;  -- the owner recorded a phone call
+alter table public.cover_requests add column if not exists excused           boolean not null default false;
+alter table public.cover_requests add column if not exists excused_by        text;
+alter table public.cover_requests add column if not exists excused_at        timestamptz;
+alter table public.cover_requests add column if not exists owner_note        text;
+
+-- fill in the new fields for opt-outs that were recorded before this feature existed
+update public.cover_requests c
+   set opted_out_at = c.created_at at time zone (select timezone from public.settings where id = 1),
+       notice_hours = extract(epoch from ((c.day::timestamp + make_interval(hours => c.start_h)) - (c.created_at at time zone (select timezone from public.settings where id = 1)))) / 3600.0,
+       triggered_standby = (c.phase = 'standby')
+ where c.kind in ('late', 'optout') and c.opted_out_at is null;
+
+-- owner-only settings (kept out of the public settings table on purpose)
+create table if not exists public.late_settings (
+  id        int primary key default 1 check (id = 1),
+  threshold int not null default 3  check (threshold between 2 and 20),   -- alert when a person reaches this many in a month
+  window_h  int not null default 48 check (window_h between 1 and 48)     -- "short notice" means under this many hours
+);
+insert into public.late_settings (id) values (1) on conflict (id) do nothing;
+
+-- one alert per person per calendar month; later events update its count
+create table if not exists public.late_optout_alerts (
+  id                uuid primary key default gen_random_uuid(),
+  staff_id          uuid not null references public.staff(id) on delete cascade,
+  month             date not null,                      -- first day of the calendar month
+  state             text not null default 'open' check (state in ('open', 'dismissed', 'closed')),
+  event_count       int  not null,
+  watching          boolean not null default false,     -- the owner chose "Keep watching"
+  watching_by       text,
+  watching_at       timestamptz,
+  dismissed_by      uuid,
+  dismissed_by_name text,
+  dismissed_at      timestamptz,
+  closed_at         timestamptz,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  unique (staff_id, month)
+);
+
+-- every counted event, excused event and alert action
+create table if not exists public.late_audit (
+  id          bigint generated always as identity primary key,
+  at          timestamptz not null default now(),
+  cafe_time   timestamp,
+  actor_id    uuid,
+  actor_name  text,
+  action      text not null,
+  staff_id    uuid,
+  cover_id    uuid,
+  alert_id    uuid,
+  detail      jsonb not null default '{}'
+);
+create index if not exists late_audit_staff_idx on public.late_audit (staff_id, at desc);
+
+alter table public.late_settings       enable row level security;
+alter table public.late_optout_alerts  enable row level security;
+alter table public.late_audit          enable row level security;
+drop policy if exists late_settings_read on public.late_settings;
+drop policy if exists late_alerts_read   on public.late_optout_alerts;
+drop policy if exists late_audit_read    on public.late_audit;
+create policy late_settings_read on public.late_settings      for select to authenticated using (public.is_owner());
+create policy late_alerts_read   on public.late_optout_alerts for select to authenticated using (public.is_owner());
+create policy late_audit_read    on public.late_audit         for select to authenticated using (public.is_owner());
+
+create or replace function public._actor_name() returns text
+language sql stable security definer set search_path = public as $$
+  select coalesce((select coalesce(nullif(display_name, ''), email) from public.profiles where id = auth.uid()), 'System')
+$$;
+
+create or replace function public._late_log(p_action text, p_staff uuid, p_cover uuid, p_alert uuid, p_detail jsonb) returns void
+language sql security definer set search_path = public as $$
+  insert into public.late_audit (cafe_time, actor_id, actor_name, action, staff_id, cover_id, alert_id, detail)
+  values (public.cafe_now(), auth.uid(), public._actor_name(), p_action, p_staff, p_cover, p_alert, coalesce(p_detail, '{}'::jsonb))
+$$;
+
+-- how many events count for one person in one month
+create or replace function public._late_count(p_staff uuid, p_month date) returns int
+language sql stable security definer set search_path = public as $$
+  select count(*)::int
+    from public.cover_requests c, public.late_settings s
+   where s.id = 1 and c.staff_id = p_staff and c.kind in ('late', 'optout')
+     and c.triggered_standby and not c.excused and c.notice_hours < s.window_h
+     and date_trunc('month', c.opted_out_at)::date = p_month
+$$;
+
+-- bring the alert for one person and month in line with the events.
+-- Creates it at the threshold, updates the count after that, closes it when excusing
+-- events drops the count below the threshold, and reopens the same one if it rises again.
+create or replace function public._late_refresh(p_staff uuid, p_month date) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare s public.late_settings; n int; a public.late_optout_alerts; v_state text;
+begin
+  select * into s from public.late_settings where id = 1;
+  n := public._late_count(p_staff, p_month);
+  select * into a from public.late_optout_alerts where staff_id = p_staff and month = p_month for update;
+  if not found then
+    if n >= s.threshold then
+      insert into public.late_optout_alerts (staff_id, month, event_count) values (p_staff, p_month, n) returning * into a;
+      perform public._late_log('alert_opened', p_staff, null, a.id, jsonb_build_object('month', p_month, 'count', n, 'threshold', s.threshold));
+      return a.id;
+    end if;
+    return null;
+  end if;
+  v_state := a.state;
+  if a.state = 'open' and n < s.threshold then v_state := 'closed';
+  elsif a.state = 'closed' and n >= s.threshold then v_state := 'open'; end if;
+  if n <> a.event_count or v_state <> a.state then
+    update public.late_optout_alerts
+       set event_count = n, state = v_state, updated_at = now(),
+           closed_at = case when v_state = 'closed' then now() when v_state = 'open' then null else closed_at end,
+           watching = case when n > a.event_count and v_state = 'open' then false else watching end   -- new information, so it comes back to the owner's list
+     where id = a.id;
+    perform public._late_log(case when v_state <> a.state and v_state = 'closed' then 'alert_closed' when v_state <> a.state then 'alert_reopened' else 'alert_updated' end,
+                             p_staff, null, a.id, jsonb_build_object('month', p_month, 'from', a.event_count, 'to', n, 'threshold', s.threshold));
+  end if;
+  return a.id;
+end $$;
+
+create or replace function public._late_refresh_all() returns void
+language plpgsql security definer set search_path = public as $$
+declare r record;
+begin
+  for r in select staff_id as sid, date_trunc('month', opted_out_at)::date as m from public.cover_requests
+            where staff_id is not null and kind in ('late', 'optout') and triggered_standby and opted_out_at is not null
+           union select staff_id, month from public.late_optout_alerts loop
+    perform public._late_refresh(r.sid, r.m);
+  end loop;
+end $$;
+
+-- called right after an opt-out is recorded: log it if it counts, then update the alert
+create or replace function public._late_record_event(p_cover uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.cover_requests; s public.late_settings; m date;
+begin
+  select * into c from public.cover_requests where id = p_cover;
+  select * into s from public.late_settings where id = 1;
+  if not found or c.staff_id is null or c.kind not in ('late', 'optout') or not c.triggered_standby or c.notice_hours >= s.window_h then return; end if;
+  m := date_trunc('month', c.opted_out_at)::date;
+  perform public._late_log('event_counted', c.staff_id, c.id, null,
+    jsonb_build_object('day', c.day, 'notice_hours', round(c.notice_hours, 1), 'month', m, 'count_after', public._late_count(c.staff_id, m), 'recorded_by_owner', c.by_owner));
+  perform public._late_refresh(c.staff_id, m);
+end $$;
+
+-- backfill and settle anything recorded before this feature existed
+select public._late_refresh_all();
+
+-- ---- owner: everything the alert screens need, in one call ----
+create or replace function public.late_alerts() returns json
+language plpgsql stable security definer set search_path = public as $$
+declare s public.late_settings; v_tz text; v_out json;
+begin
+  if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
+  select * into s from public.late_settings where id = 1;
+  select timezone into v_tz from public.settings where id = 1;
+  select json_build_object('threshold', s.threshold, 'window_h', s.window_h,
+           'alerts', coalesce(json_agg(a order by a.month desc, a.created_at desc), '[]'::json))
+    into v_out
+    from (
+      select al.id, al.staff_id, st.name as staff_name, al.month, al.state, al.event_count, al.watching, al.watching_by,
+             al.dismissed_by_name, (al.dismissed_at at time zone v_tz)::date as dismissed_on, al.created_at,
+             (select json_agg(e order by e.day, e.start_h) from (
+                select c.id, c.day, c.start_h, c.end_h, c.notice_hours, c.status, c.covered_via, cb.name as covered_by_name,
+                       c.excused, c.excused_by, c.owner_note as note, c.reason, c.by_owner,
+                       case when c.covered_by is not null and cp.rate is not null
+                            then coalesce(sh.end_h - sh.start_h, c.w_to - c.w_from) end as cover_hours,
+                       case when c.covered_by is not null and cp.rate is not null
+                            then round(coalesce(sh.end_h - sh.start_h, c.w_to - c.w_from) * cp.rate, 2) end as cost
+                  from public.cover_requests c
+                  left join public.staff cb on cb.id = c.covered_by
+                  left join public.staff_private cp on cp.staff_id = c.covered_by
+                  left join public.shifts sh on sh.staff_id = c.covered_by and sh.day = c.day
+                 where c.staff_id = al.staff_id and c.kind in ('late', 'optout') and c.triggered_standby
+                   and c.notice_hours < s.window_h and date_trunc('month', c.opted_out_at)::date = al.month
+             ) e) as events
+        from public.late_optout_alerts al
+        join public.staff st on st.id = al.staff_id
+       where al.month >= (date_trunc('month', public.cafe_today()) - interval '5 months')::date
+    ) a;
+  return v_out;
+end $$;
+
+create or replace function public.late_save_settings(p_threshold int, p_window int) returns json
+language plpgsql security definer set search_path = public as $$
+declare o public.late_settings;
+begin
+  if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
+  if p_threshold is null or p_threshold < 2 or p_threshold > 20 then raise exception 'Alert after must be between 2 and 20 late opt-outs.'; end if;
+  if p_window is null or p_window < 1 or p_window > 48 then raise exception 'Short notice must be between 1 and 48 hours. Standby only starts within 48 hours.'; end if;
+  select * into o from public.late_settings where id = 1;
+  if o.threshold <> p_threshold or o.window_h <> p_window then
+    update public.late_settings set threshold = p_threshold, window_h = p_window where id = 1;
+    perform public._late_log('settings_changed', null, null, null, jsonb_build_object('threshold_from', o.threshold, 'threshold_to', p_threshold, 'window_from', o.window_h, 'window_to', p_window));
+    perform public._late_refresh_all();
+  end if;
+  return json_build_object('threshold', p_threshold, 'window_h', p_window);
+end $$;
+
+-- ---- owner: mark an event as excused (for example illness) or take the excuse back ----
+create or replace function public.late_event_excuse(p_cover uuid, p_excused boolean, p_note text default null) returns json
+language plpgsql security definer set search_path = public as $$
+declare c public.cover_requests; a public.late_optout_alerts; v_id uuid; v_note text := nullif(left(trim(coalesce(p_note, '')), 500), '');
+begin
+  if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
+  select * into c from public.cover_requests where id = p_cover for update;
+  if not found or c.staff_id is null or c.kind not in ('late', 'optout') or not c.triggered_standby then raise exception 'That is not a late opt-out.'; end if;
+  update public.cover_requests
+     set excused = p_excused, excused_by = case when p_excused then public._actor_name() end, excused_at = case when p_excused then now() end,
+         owner_note = case when p_note is null then owner_note else v_note end
+   where id = c.id;
+  perform public._late_log(case when p_excused then 'event_excused' else 'event_unexcused' end, c.staff_id, c.id, null,
+                           jsonb_build_object('day', c.day, 'note', v_note));
+  v_id := public._late_refresh(c.staff_id, date_trunc('month', c.opted_out_at)::date);
+  select * into a from public.late_optout_alerts where id = v_id;
+  return json_build_object('alert_id', v_id, 'state', a.state, 'count', a.event_count);
+end $$;
+
+create or replace function public.late_event_note(p_cover uuid, p_note text) returns void
+language plpgsql security definer set search_path = public as $$
+declare c public.cover_requests; v_note text := nullif(left(trim(coalesce(p_note, '')), 500), '');
+begin
+  if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
+  select * into c from public.cover_requests where id = p_cover for update;
+  if not found or c.staff_id is null or c.kind not in ('late', 'optout') or not c.triggered_standby then raise exception 'That is not a late opt-out.'; end if;
+  update public.cover_requests set owner_note = v_note where id = c.id;
+  perform public._late_log('note_added', c.staff_id, c.id, null, jsonb_build_object('day', c.day, 'note', v_note));
+end $$;
+
+-- ---- owner: dismiss, or keep watching ----
+create or replace function public.late_alert_dismiss(p_alert uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare a public.late_optout_alerts;
+begin
+  if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
+  select * into a from public.late_optout_alerts where id = p_alert for update;
+  if not found then raise exception 'That alert could not be found.'; end if;
+  if a.state <> 'open' then raise exception 'Only an open alert can be dismissed.'; end if;
+  update public.late_optout_alerts
+     set state = 'dismissed', dismissed_by = auth.uid(), dismissed_by_name = public._actor_name(), dismissed_at = now(), watching = false, updated_at = now()
+   where id = a.id;
+  perform public._late_log('alert_dismissed', a.staff_id, null, a.id, jsonb_build_object('month', a.month, 'count', a.event_count));
+end $$;
+
+create or replace function public.late_alert_watch(p_alert uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare a public.late_optout_alerts;
+begin
+  if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
+  select * into a from public.late_optout_alerts where id = p_alert for update;
+  if not found then raise exception 'That alert could not be found.'; end if;
+  if a.state <> 'open' then raise exception 'Only an open alert can be watched.'; end if;
+  update public.late_optout_alerts set watching = true, watching_by = public._actor_name(), watching_at = now(), updated_at = now() where id = a.id;
+  perform public._late_log('alert_watching', a.staff_id, null, a.id, jsonb_build_object('month', a.month, 'count', a.event_count));
+end $$;
+
+-- ---- sample data for the demo only: three late opt-outs by one casual in the current month ----
+create or replace function public._seed_late_sample(t date) returns void
+language plpgsql security definer set search_path = public as $$
+declare anchor date; d date; first_ok date; n int := 0; sid uuid; cov uuid[]; v_id uuid;
+  notice numeric[] := array[20, 9, 30]; why text[] := array['Unwell', null, 'Family matter'];
+begin
+  select id into sid from public.staff where name = 'Callum Reid';
+  if sid is null then return; end if;
+  cov := array[(select id from public.staff where name = 'Priya Nair'), (select id from public.staff where name = 'Liam Tran'), (select id from public.staff where name = 'Sofia Lindqvist')];
+  anchor := case when extract(day from t) >= 15 then t else (date_trunc('month', t)::date - 1) end;   -- early in a month, use last month so three events fit
+  first_ok := date_trunc('month', anchor)::date + 2;
+  d := anchor - 1;
+  while n < 3 and d >= first_ok loop
+    if extract(isodow from d) in (2, 3, 4) then        -- Callum works Tuesday to Thursday
+      n := n + 1;
+      insert into public.cover_requests (kind, phase, status, staff_id, day, start_h, end_h, w_from, w_to, reason, covered_by, covered_via, covered_at, opted_out_at, notice_hours, triggered_standby)
+      values ('late', 'standby', 'covered', sid, d, 7, 15, 7, 15, why[n], cov[n], 'standby', now(), d::timestamp + interval '7 hours' - notice[n] * interval '1 hour', notice[n], true)
+      returning id into v_id;
+      perform public._late_record_event(v_id);
+    end if;
+    d := d - 1;
+  end loop;
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -766,6 +1072,8 @@ grant execute on function
   public.owner_open_gap(date, int, int, int, int, text), public.owner_alert_standby(uuid, uuid[]),
   public.save_roster(date, text, jsonb, jsonb), public.publish_roster(date), public.update_my_availability(jsonb, jsonb),
   public.update_my_standby(jsonb), public.send_chat(text),
+  public.late_alerts(), public.late_save_settings(int, int), public.late_event_excuse(uuid, boolean, text), public.late_event_note(uuid, text),
+  public.late_alert_dismiss(uuid), public.late_alert_watch(uuid),
   public.seed_demo(boolean)
 to authenticated;
 -- the helpers below are used inside row level security policies, which run as the signed-in user

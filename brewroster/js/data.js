@@ -29,7 +29,9 @@ async function loadOwnerData(opts) {
     SB.select('cover_requests', { day: 'gte.' + since, order: 'day.asc,start_h.asc', limit: 1000 }),
     SB.select('chat_messages', { order: 'created_at.desc', limit: 30 }),
     SB.select('standby_alerts', { day: 'gte.' + since, limit: 2000 }),
-    SB.select('profiles', { select: 'staff_id,role', role: 'eq.employee' })
+    SB.select('profiles', { select: 'staff_id,role', role: 'eq.employee' }),
+    // owner-only late opt-out alerts. If the database has not been updated yet this is skipped, so the rest of the app still works.
+    SB.rpc('late_alerts').catch(function () { return null; })
   ]);
   return q;
 }
@@ -38,6 +40,7 @@ function applyOwnerData(q) {
   const settings = q[0][0] || {}, staffRows = q[1], priv = byKey(q[2], 'staff_id');
   APP.settings = settings; if (settings.timezone) APP.tz = settings.timezone;
   state.cap = settings.cap || 20; state.minStaff = settings.min_staff || 2;
+  state.lateAlerts = q[13] && q[13].alerts ? q[13] : null;
   state.factors = { weather: settings.use_weather !== false, events: settings.use_events !== false, school: settings.use_school !== false };
 
   const all = staffRows.map(function (r) { return personFromRow(r, priv[r.id]); });

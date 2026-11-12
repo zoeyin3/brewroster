@@ -65,6 +65,19 @@ const ICONS = {
   chat: '<path d="M4 4.5h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H9.5L6 17v-3.5H4a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z"/>',
   standby: '<path d="M5.2 14V9.2a4.8 4.8 0 0 1 9.6 0V14l1.4 1.5H3.8z"/><path d="M8.4 17.5a1.7 1.7 0 0 0 3.2 0"/>'
 };
+// the Brewroster mark: a cup with steam
+function logo() { return '<span class="logo"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.5 13.5h13v5.2a5.8 5.8 0 0 1-5.8 5.8h-1.4a5.8 5.8 0 0 1-5.8-5.8z"/><path d="M20.5 15.2h1.5a2.8 2.8 0 0 1 0 5.6h-2"/><path d="M11.2 5.6c-1.3 1.5 1.3 2.8 0 4.4M16.2 5.6c-1.3 1.5 1.3 2.8 0 4.4"/></svg></span>'; }
+function initialsOf(name) { return String(name || '?').split(/\s+/).filter(Boolean).map(function (w) { return w[0]; }).join('').slice(0, 2).toUpperCase() || '?'; }
+// a short fade when someone switches tabs (not on background refreshes, which would flicker)
+function swapAnim() { const v = $('view'); if (!v) return; v.classList.remove('swap'); void v.offsetWidth; v.classList.add('swap'); }
+function openProfile() {
+  const p = APP.profile || {}, u = SB.auth.user() || {}, name = p.display_name || u.email || '';
+  const cafe = (APP.settings && APP.settings.cafe_name) || '';
+  showModal('<div class="pf"><span class="avatar xl">' + esc(initialsOf(name)) + '</span><b>' + esc(name) + '</b><span class="muted">' + esc(u.email || '') + '</span>' +
+    '<span class="chips" style="justify-content:center"><span class="chip">' + (APP.role === 'owner' ? 'Owner' : 'Employee') + '</span>' + (cafe ? '<span class="chip line">' + esc(cafe) + '</span>' : '') + '</span></div>' +
+    '<div class="sheet-acts"><button class="btn danger block" data-act="signOut">Sign out</button><button class="btn block" data-act="closeModal">Close</button></div>', 'sheet');
+}
+
 function ic(n, size) { return '<svg width="' + (size || 18) + '" height="' + (size || 18) + '" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[n] + '</svg>'; }
 
 /* ---------- modal ---------- */
@@ -76,3 +89,11 @@ function editingField() {
   const a = document.activeElement;
   return !!(a && a !== document.body && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && $('view') && $('view').contains(a));
 }
+
+// Escape closes whichever sheet or dialog is open (the profile sheet included)
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape' || !modalOpen()) return;
+  hideModal();
+  try { if (typeof E !== 'undefined') E.modal = null; } catch (x) { /* employee app not loaded */ }
+  try { if (typeof state !== 'undefined') state.modal = null; } catch (x) { /* owner app not loaded */ }
+});

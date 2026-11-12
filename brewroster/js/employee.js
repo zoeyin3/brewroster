@@ -79,16 +79,27 @@ function myShiftCard(s) {
   return '<article class="shiftcard' + (c ? ' cancelled' : '') + '"><div class="sc-date"><b>' + DOW[dowOf(s.day)] + '</b><span>' + dayNum(s.day) + '</span><small>' + monOf(s.day) + '</small></div>' +
     '<div class="sc-main"><b>' + hRange(s.s, s.e) + '</b><span>' + (rel ? rel + ' · ' : '') + shiftHours(s) + ' hours</span><div class="chips">' + statusChips(s) + '</div></div><div class="sc-act">' + act + '</div></article>';
 }
+// the next shift, big, like a boarding pass
+function nextCard(s) {
+  const started = hoursUntil(s.day, s.s) <= 0, dd = daysBetween(TODAY, s.day), rel = started ? 'On now' : dd === 0 ? 'Today' : dd === 1 ? 'Tomorrow' : 'In ' + dd + ' days';
+  const act = started ? '<span class="nx-live">In progress</span>' : '<button class="btn onnavy" data-act="cantMake" data-id="' + s.id + '">I can\'t make it</button>';
+  const left = started ? '' : hoursUntil(s.day, s.s) < 48 ? 'Starts in ' + Math.max(1, Math.round(hoursUntil(s.day, s.s))) + ' ' + plural(Math.max(1, Math.round(hoursUntil(s.day, s.s))), 'hour') : '';
+  return '<article class="nextcard"><div class="nx-top"><span class="nx-rel">' + esc(rel) + '</span><span class="nx-date">' + dLabel(s.day) + '</span></div>' +
+    '<div class="nx-time">' + hFmt(s.s) + '<i>to</i>' + hFmt(s.e) + '</div><div class="nx-sub">' + shiftHours(s) + ' hours' + (left ? ' · ' + left : '') + '</div>' +
+    '<div class="nx-foot">' + statusChips(s).replace(/chip line/g, 'chip glass') + act + '</div></article>';
+}
 function mineList() {
   const list = myShifts().filter(function (s) { return hoursUntil(s.day, s.e) > 0; }).sort(function (a, b) { return a.day.localeCompare(b.day) || a.s - b.s; });
   if (!list.length) return empty('No shifts coming up', 'When your manager uploads the next roster, your shifts will show here.');
   const wk = weekHoursMine(weekStartOf(TODAY));
-  return '<p class="small" style="margin:0 0 10px">' + list.length + ' ' + plural(list.length, 'shift') + ' coming up. This week: ' + wk + ' hours' + (E.priv ? ' of up to ' + E.priv.max_hours : '') + '.</p><div class="list">' + list.map(myShiftCard).join('') + '</div>';
+  const hero = list.find(function (s) { return !coverOf(s.staffId, s.day); }), rest = list.filter(function (s) { return s !== hero; });
+  const stat = '<div class="statline"><div><b class="num">' + list.length + '</b><span>' + plural(list.length, 'shift') + ' coming up</span></div><div><b class="num">' + wk + '</b><span>hours this week' + (E.priv && E.priv.max_hours ? ' of ' + E.priv.max_hours : '') + '</span></div></div>';
+  return (hero ? nextCard(hero) : '') + stat + (rest.length ? '<h2 class="sec">' + (hero ? 'Later' : 'Your shifts') + '</h2><div class="list">' + rest.map(myShiftCard).join('') + '</div>' : '');
 }
 function teamWeek() {
   const ws = WEEKS[E.weekIdx], days = weekDays(ws);
   const sw = '<div class="wk"><button class="icon-btn" data-act="eweek" data-d="-1" aria-label="Previous week"' + (E.weekIdx === 0 ? ' disabled' : '') + '>‹</button><span>' + weekLabel(ws) + '<small>' + (ws === WEEKS[0] ? 'This week' : ws === WEEKS[1] ? 'Next week' : '') + '</small></span><button class="icon-btn" data-act="eweek" data-d="1" aria-label="Next week"' + (E.weekIdx === WEEKS.length - 1 ? ' disabled' : '') + '>›</button></div>';
-  if (!E.up[ws]) return '<div style="display:flex;justify-content:center;margin-bottom:12px">' + sw + '</div>' + empty('Not published yet', 'The roster for this week has not been uploaded. Your manager uploads each week\'s roster once leave is sorted.');
+  if (!E.up[ws]) return '<div class="wkbar">' + sw + '</div>' + empty('Not published yet', 'The roster for this week has not been uploaded. Your manager uploads each week\'s roster once leave is sorted.');
   const cards = days.map(function (d) {
     const rows = E.shifts.filter(function (s) { return s.day === d; }).sort(function (a, b) { return a.s - b.s || person(a.staffId).name.localeCompare(person(b.staffId).name); });
     const body = rows.length ? rows.map(function (s) {
@@ -106,8 +117,8 @@ function weekLabel(ws) {
 function vShifts() {
   const calls = myCalls().length;
   const banner = calls ? '<div class="banner warn"><div><b>' + calls + ' ' + plural(calls, 'shift call') + ' waiting for you.</b> Dana needs cover and thought of you.</div><button class="btn sm primary" data-act="etab" data-t="standby">Reply</button></div>' : '';
-  const sub = '<div class="tabs"><button class="tab" role="tab" aria-selected="' + (E.sub === 'mine') + '" data-act="esub" data-t="mine">My shifts</button><button class="tab" role="tab" aria-selected="' + (E.sub === 'team') + '" data-act="esub" data-t="team">Whole team</button></div>';
-  return ehead('Roster', 'Hi ' + esc(E.me ? E.me.first : '') + ' · ' + DOW_LONG[dowOf(TODAY)] + ' ' + dayNum(TODAY) + ' ' + MONTH_LONG[pd(TODAY).getUTCMonth()]) + banner + sub + (E.sub === 'mine' ? mineList() : teamWeek()) +
+  const sub = '<div class="tabs seg"><button class="tab" role="tab" aria-selected="' + (E.sub === 'mine') + '" data-act="esub" data-t="mine">My shifts</button><button class="tab" role="tab" aria-selected="' + (E.sub === 'team') + '" data-act="esub" data-t="team">Whole team</button></div>';
+  return ehead('Hi ' + esc(E.me ? E.me.first : 'there'), DOW_LONG[dowOf(TODAY)] + ' ' + dayNum(TODAY) + ' ' + MONTH_LONG[pd(TODAY).getUTCMonth()]) + banner + sub + (E.sub === 'mine' ? mineList() : teamWeek()) +
     '<p class="small foot">Can\'t work a shift? Tap <b>I can\'t make it</b>. Shifts 14 or more days away need a leave request instead.</p>';
 }
 const MONTH_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -144,7 +155,7 @@ function vChat() {
     return '<article class="panel call"><div class="who"><b>' + whenText(c.day, c.start_h, c.end_h) + '</b><span>' + (c.phase === 'chat' ? 'Posted to the team chat. If nobody takes it, it moves to Standby 48 hours before.' : 'Dana is calling standby staff.') + '</span></div></article>';
   }).join('') + '</div>';
   h += '<h2 class="sec">Messages</h2><section class="panel chatp"><div class="chat" id="chatbox">' + (E.chat.length ? E.chat.map(bubble).join('') : '<div class="bub note">Nothing posted yet. Say hello.</div>') + '</div>' +
-    '<div class="composer"><input id="chat-in" type="text" maxlength="300" placeholder="Message the team" autocomplete="off" aria-label="Message the team"><button class="btn primary" data-act="sendChat">Send</button></div></section>';
+    '<div class="composer"><input id="chat-in" type="text" maxlength="300" placeholder="Message the team" autocomplete="off" aria-label="Message the team"><button class="sendbtn" data-act="sendChat" aria-label="Send message"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16V4M4.5 9.5 10 4l5.5 5.5"/></svg></button></div></section>';
   return h;
 }
 
@@ -207,7 +218,7 @@ function renderTabs() {
   $('tabbar').innerHTML = TABS.map(function (t) {
     const n = t[0] === 'chat' ? nOpen : t[0] === 'standby' ? nCalls : 0;
     const b = n ? '<span class="badge' + (t[0] === 'standby' ? ' alert' : '') + '">' + n + '</span>' : '';
-    return '<button data-act="etab" data-t="' + t[0] + '"' + (E.tab === t[0] ? ' aria-current="page"' : '') + '>' + ic(t[2], 22) + '<span>' + t[1] + '</span>' + b + '</button>';
+    return '<button data-act="etab" data-t="' + t[0] + '"' + (E.tab === t[0] ? ' aria-current="page"' : '') + '><span>' + t[1] + '</span>' + b + '</button>';
   }).join('');
 }
 function render() {
@@ -221,7 +232,8 @@ function toTop() { window.scrollTo(0, 0); }
 
 /* ---------- actions ---------- */
 const ACT = {
-  etab: function (t) { E.tab = t.dataset.t; closeModalE(); render(); toTop(); },
+  etab: function (t) { E.tab = t.dataset.t; closeModalE(); render(); toTop(); swapAnim(); },
+  profile: function () { openProfile(); },
   esub: function (t) { E.sub = t.dataset.t; render(); },
   eweek: function (t) { const i = E.weekIdx + Number(t.dataset.d); if (i >= 0 && i < WEEKS.length) { E.weekIdx = i; render(); } },
   closeModal: function (t, e) { if (t.id === 'scrim' && e.target !== t) return; closeModalE(); },

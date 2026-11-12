@@ -173,6 +173,9 @@ function vHome() {
   }
   const sb = openLate().length + standbyGaps().length;
   if (sb) rows.push({ n: sb, tone: 'bad', t: plural(sb, 'shift needs', 'shifts need') + ' cover in the next 48 hours', s: 'Standby staff are listed for each one.', b: 'Find cover', go: ['cover', 'standby'] });
+  lateToReview().forEach(function (al) {
+    rows.push({ n: al.event_count, tone: 'warn', t: 'Late opt-out alert: ' + esc(lateFirst(al)), s: lateSentence(al), b: 'Review', go: ['cover', 'standby'] });
+  });
   const ch = openChat().length + chatGaps().length;
   if (ch) rows.push({ n: ch, tone: '', t: plural(ch, 'open shift') + ' in the team chat', s: 'Teammates can register. Nothing needed from you yet.', b: 'See chat', go: ['cover', 'chat'] });
   const nx = nextToUpload();
@@ -183,7 +186,7 @@ function vHome() {
         { n: '!', tone: '', t: 'Roster for ' + weekName(nx) + ' is ready to upload', s: 'Check it, then upload it so staff can see it.', b: 'Review roster', go: ['roster', null, nx] });
   }
   const attn = rows.length ? rows.map(function (x) {
-    return '<div class="attn-row"><span class="attn-n ' + x.tone + '">' + x.n + '</span><div><b>' + x.t.charAt(0).toUpperCase() + x.t.slice(1) + '</b><span class="s">' + x.s + '</span></div><button class="btn sm ' + (x.tone ? 'primary' : '') + '" data-act="go" data-v="' + x.go[0] + '"' + (x.go[1] ? ' data-tab="' + x.go[1] + '"' : '') + (x.go[2] ? ' data-week="' + x.go[2] + '"' : '') + '>' + x.b + '</button></div>';
+    return '<div class="attn-row"><span class="attn-n ' + x.tone + '">' + x.n + '</span><div><b>' + x.t.charAt(0).toUpperCase() + x.t.slice(1) + '</b><span class="s">' + x.s + '</span></div><button class="btn sm" data-act="go" data-v="' + x.go[0] + '"' + (x.go[1] ? ' data-tab="' + x.go[1] + '"' : '') + (x.go[2] ? ' data-week="' + x.go[2] + '"' : '') + '>' + x.b + '</button></div>';
   }).join('') : '<div class="attn-row"><div><b>All clear</b><span class="s">Nothing needs your attention right now.</span></div></div>';
   const days = ev.days.map(function (d, i) {
     const f = dayFactors(d.date), pk = d.cov.reduce(function (a, c2) { return c2.tx > a.tx ? c2 : a; }, d.cov[0]);
@@ -339,6 +342,7 @@ function vLeave() {
   const waiting = WEEKS.filter(function (w) { return pendingFor(w) > 0 && !isUp(w); });
   return pageHead('Leave requests', 'Staff ask for leave at least ' + NOTICE_DAYS + ' days ahead. Decide each one before that week\'s roster is built, so the roster only ever includes people who can work.',
     '') +
+    (lateToReview().length ? '<div class="banner info"><div><b>Late opt-out alert.</b> ' + lateToReview().length + ' ' + plural(lateToReview().length, 'person has', 'people have') + ' reached ' + lateData().threshold + ' or more late opt-outs this month. It is in Shift cover.</div><button class="btn sm" data-act="go" data-v="cover" data-tab="standby">Review</button></div>' : '') +
     (waiting.length ? '<div class="banner info"><div><b>Rosters waiting on leave:</b> ' + waiting.map(function (w) { return 'week of ' + dShort(w) + ' (' + pendingFor(w) + ')'; }).join(', ') + '.</div></div>' : '') +
     '<div class="tabs" role="tablist">' + tabs + '</div>' +
     (list.length ? '<div class="list">' + list.map(leaveCard).join('') + '</div>' :
@@ -373,7 +377,21 @@ function rosterGrid(ws, r, c) {
       '<div class="tot"><b class="num">' + hrs + 'h <span class="small" style="font-weight:400">of ' + s.max + 'h</span></b><div class="bar"><i class="' + (hrs >= s.max ? 'full' : '') + '" style="width:' + Math.min(100, Math.round(hrs / s.max * 100)) + '%"></i></div></div>';
   });
   g += '</div>';
-  return '<div class="hs">' + g + '</div>';
+  return '<div class="hs rwide">' + g + '</div>' + rosterDayView(ws, r, c);
+}
+
+// On a phone the week grid is too wide, so the same cells are shown one day at a time.
+function rosterDayView(ws, r, c) {
+  const days = weekDays(ws);
+  let i = state.rday; if (i == null || i < 0 || i > 6) { i = days.indexOf(TODAY); if (i < 0) i = 0; }
+  const d = days[i], f = dayFactors(d), on = STAFF.filter(function (s) { return r.shifts[d] && r.shifts[d][s.id]; }).length;
+  const pills = days.map(function (dd, k) {
+    return '<button class="dpill' + (k === i ? ' on' : '') + (dd === TODAY ? ' today' : '') + '" data-act="rday" data-i="' + k + '" aria-pressed="' + (k === i) + '"><span>' + DOW[k] + '</span><b>' + dayNum(dd) + '</b></button>';
+  }).join('');
+  const rows = STAFF.map(function (s) {
+    return '<div class="drow"><span class="avatar">' + s.initials + '</span><div class="dn"><b>' + s.name + '</b><small>' + s.role + '</small></div>' + cellHTML(s, d, r, c) + '</div>';
+  }).join('');
+  return '<div class="rday"><div class="dpills">' + pills + '</div><div class="dayline"><b>' + DOW_LONG[i] + ' ' + dShort(d) + '</b><span class="small">' + on + ' on' + (f.weather ? ' · ' + f.weather.c + ' ' + f.weather.t + '°' : '') + '</span></div>' + rows + '</div>';
 }
 
 function coverGrid(ws, ev) {
@@ -406,7 +424,7 @@ function vRoster() {
         '<div class="actions"><button class="btn primary" data-act="go" data-v="leave">Review leave requests</button><button class="btn" disabled>Build roster</button></div></section>';
     }
     return head + '<section class="panel gate"><h2>' + (state.busy ? 'Rosterbot is planning' : 'No roster yet for ' + weekName(ws)) + '</h2><p>Leave for this week is decided. Rosterbot builds the roster from your POS sales, the weather and local events, and the team\'s availability.</p><p class="small" style="margin-top:6px">' + awayTxt + '</p>' +
-      '<div class="actions"><button class="btn primary" data-act="optimise"' + (state.busy ? ' disabled' : '') + '>' + (state.busy ? '<span class="spin"></span> Planning' : ic('bot', 16) + ' Build roster') + '</button></div></section>';
+      '<div class="actions"><button class="btn primary" data-act="optimise"' + (state.busy ? ' disabled' : '') + '>' + (state.busy ? '<span class="spin"></span> Planning' : 'Build roster') + '</button></div></section>';
   }
   const ev = evalWeek(ws, r, c), gaps = rosterGaps(ws), ex = state.explain[ws];
   const notes = [];
@@ -415,7 +433,7 @@ function vRoster() {
   if (nCover.length) notes.push('<div class="banner bad"><div><b>' + nCover.length + ' ' + plural(nCover.length, 'shift needs', 'shifts need') + ' cover.</b> ' + nCover.map(function (l) { return staffById(l.staffId).first + ' ' + DOW[dowOf(l.date)]; }).join(', ') + '.</div><button class="btn sm primary" data-act="goCover" data-tab="' + (nCover.some(function (l) { return l.phase === 'standby'; }) ? 'standby' : 'chat') + '">See cover</button></div>');
   if (gaps.length) notes.push('<div class="banner info"><div><b>' + gaps.length + ' ' + plural(gaps.length, 'gap') + ' the team cannot cover:</b> ' + gaps.slice(0, 3).map(function (g) { return DOW[dowOf(g.date)] + ' ' + hRange(g.from, g.to); }).join(', ') + (gaps.length > 3 ? ' and more' : '') + '.' + (up ? '' : ' You can post them to the team chat once the roster is uploaded.') + '</div>' + (up ? '<button class="btn sm" data-act="goCover" data-tab="' + (gaps.every(function (g) { return gapTier(g) === 'standby'; }) ? 'standby' : 'chat') + '">See cover</button>' : '') + '</div>');
   const status = up ? '<span class="chip ok">Uploaded</span><span class="small">Staff can see this roster. Changes go through Shift cover.</span>' : '<span class="chip warn">Draft</span><span class="small">Staff cannot see it until you upload it.</span>';
-  const optLabel = state.busy ? '<span class="spin"></span> Planning' : ic('bot', 16) + ' Rebuild';
+  const optLabel = state.busy ? '<span class="spin"></span> Planning' : 'Rebuild';
   const actions = up ? '' : '<button class="btn" data-act="optimise"' + (state.busy ? ' disabled' : '') + '>' + optLabel + '</button><button class="btn primary" data-act="publish"' + (pend ? ' disabled' : '') + '>Approve and upload</button>';
   const sumLine = ex && !up ? '<p class="small">Compared with last week\'s roster: short-staffed hours ' + ex.before.shortHours + ' → ' + ex.after.shortHours + ', sales at risk ' + money(ex.before.lostSales) + ' → ' + money(ex.after.lostSales) + '.</p>' : '';
   return head + '<div class="statusrow"><div class="chips" style="align-items:center">' + status + '</div><div class="head-r">' + actions + '</div></div>' + notes.join('') +
@@ -423,7 +441,7 @@ function vRoster() {
     kpi('Sales at risk', money(ev.lostSales), 'from queues in short-staffed hours', ev.lostSales > 500 ? 'bad' : '', ev.lostSales > 500 ? 'alert' : '') +
     kpi('Labour cost', money(ev.labour), ev.hours + ' staff-hours · ' + ev.labourPct.toFixed(1) + '% of sales') + '</div>' + sumLine +
     '<section class="panel"><div class="panel-h"><div><h2>Shifts</h2><p>Select any cell to add, change or remove a shift.</p></div></div>' + rosterGrid(ws, r, c) +
-    '<div class="legend" style="margin-top:14px"><span class="sw-row"><i class="sw-i" style="background:#0B1F3A"></i>Shift</span><span class="sw-row"><i class="sw-i" style="background:#E4EAF3"></i>On leave</span><span class="sw-row"><i class="sw-i" style="background:repeating-linear-gradient(135deg,#FBE7E5 0 3px,#fff 3px 6px);border:1px dashed #E7B1AC"></i>Cancelled</span><span class="sw-row"><i class="sw-i" style="background:repeating-linear-gradient(135deg,#FCEFD6 0 3px,#fff 3px 6px);border:1px dashed #D9B25F"></i>Opted out, in team chat</span></div></section>' +
+    '<div class="legend"><span class="sw-row"><i class="sw-i" style="background:#E9EFF8;border:1px solid #C4D1E6"></i>Shift</span><span class="sw-row"><i class="sw-i" style="background:#EEF0F3;border:1px solid #D5DAE1"></i>On leave</span><span class="sw-row"><i class="sw-i" style="background:#FBE9E7;border:1px solid #EBC3BF"></i>Cancelled</span><span class="sw-row"><i class="sw-i" style="background:#FBF0D9;border:1px solid #EBD3A2"></i>Opted out, in team chat</span></div></section>' +
     fold('Cover by hour', 'staff on against staff needed', coverGrid(ws, ev));
 }
 
@@ -489,7 +507,7 @@ function renderNav() {
   const chatN = openChat().length + chatGaps().length, sbN = openLate().length + standbyGaps().length, cov = chatN + sbN;
   document.getElementById('nav').innerHTML = NAV.map(function (n) {
     const b = n[0] === 'leave' && pend ? '<span class="badge">' + pend + '</span>' : n[0] === 'cover' && cov ? '<span class="badge' + (sbN ? ' alert' : '') + '">' + cov + '</span>' : '';
-    return '<button data-act="nav" data-v="' + n[0] + '"' + (state.view === n[0] ? ' aria-current="page"' : '') + '>' + ic(n[0]) + '<span class="nl-full">' + n[1] + '</span><span class="nl-short">' + (NAV_SHORT[n[0]] || n[1]) + '</span>' + b + '</button>';
+    return '<button data-act="nav" data-v="' + n[0] + '"' + (state.view === n[0] ? ' aria-current="page"' : '') + '><span class="nl-full">' + n[1] + '</span><span class="nl-short">' + (NAV_SHORT[n[0]] || n[1]) + '</span>' + b + '</button>';
   }).join('');
 }
 
@@ -574,7 +592,7 @@ function vCover() {
   const chatN = openChat().length + chatGaps().length, sbN = openLate().length + standbyGaps().length, tab = state.coverTab;
   const tabs = '<button class="tab" role="tab" aria-selected="' + (tab === 'chat') + '" data-act="covertab" data-t="chat">Team chat (' + chatN + ')</button><button class="tab" role="tab" aria-selected="' + (tab === 'standby') + '" data-act="covertab" data-t="standby">Standby (' + sbN + ')</button>';
   return pageHead('Shift cover', 'When someone cannot work a shift on the uploaded roster. The earlier they tell you, the less it costs.', '') +
-    rulesBar(tab) + '<div class="tabs" role="tablist">' + tabs + '</div>' + (tab === 'chat' ? chatTab() : standbyTab());
+    lateSection() + rulesBar(tab) + '<div class="tabs" role="tablist">' + tabs + '</div>' + (tab === 'chat' ? chatTab() : standbyTab());
 }
 
 
@@ -609,10 +627,16 @@ function availDisplay(s) {
 function personCard(s) {
   const sbd = s.standbyDays.map(function (on, i) { return '<button class="dchip" aria-pressed="' + on + '" data-act="standbyDay" data-id="' + s.id + '" data-d="' + i + '" aria-label="Happy to be called in on ' + DOW_LONG[i] + 's">' + DOW[i] + '</button>'; }).join('');
   const status = !s.email ? '<span class="chip warn">No email yet</span>' : state.linked[s.id] ? '<span class="chip ok">Signed in</span>' : '<span class="chip line">Not signed up yet</span>';
-  return '<article class="panel person"><div class="person-top"><span class="avatar">' + esc(s.initials) + '</span><div style="flex:1;min-width:0"><b>' + esc(s.name) + '</b><span>' + esc(s.role) + ' · $' + s.rate + '/h · up to ' + s.max + 'h a week</span></div><button class="btn sm" data-act="editStaff" data-id="' + s.id + '">Edit</button></div>' +
-    '<div class="chips">' + status + (s.email ? '<span class="chip line">' + esc(s.email) + '</span>' : '') + '</div>' +
-    '<div><div class="small" style="margin-bottom:6px">Usual availability</div><div class="avail">' + availDisplay(s) + '</div></div>' +
-    '<div><div class="small" style="margin-bottom:6px">Happy to be called in on (Standby)</div><div class="dchips">' + sbd + '</div></div></article>';
+  return '<article class="person"><div class="pn"><b>' + esc(s.name) + '</b><span>' + esc(s.role) + (s.email ? ' · ' + esc(s.email) : '') + '</span></div>' +
+    '<div class="pr">$' + s.rate + '/h</div><div class="pm">' + s.max + 'h</div>' +
+    '<div class="pa" data-l="Usual availability">' + availDisplay(s) + '</div><span class="sp"></span>' +
+    '<div class="ps" data-l="Happy to be called in on (Standby)">' + sbd + '</div><span class="sp"></span>' +
+    '<div class="pst">' + status + '</div><div class="pe"><button class="btn sm" data-act="editStaff" data-id="' + s.id + '">Edit</button></div></article>';
+}
+function teamHead() {
+  const d = DOW.map(function (x) { return '<span class="t-c">' + x + '</span>'; }).join('');
+  return '<div class="trow-h trow-g"><span class="t-s3"></span><span class="grp">Usual availability</span><span></span><span class="grp">Happy to be called in on (Standby)</span></div>' +
+    '<div class="trow-h"><span>Name</span><span>Rate</span><span>Max</span>' + d + '<span></span>' + d + '<span></span><span>Account</span><span></span></div>';
 }
 function cafeSettingsFold() {
   const s = APP.settings || {};
@@ -622,11 +646,12 @@ function cafeSettingsFold() {
     '<div class="row"><label>Latitude<input id="cs-lat" type="number" step="0.0001" value="' + (s.lat == null ? '' : s.lat) + '"></label><label>Longitude<input id="cs-lng" type="number" step="0.0001" value="' + (s.lng == null ? '' : s.lng) + '"></label></div>' +
     '<p class="small">Your location is used only to fetch the weather forecast for the Demand forecast.</p>' +
     '<div class="actions"><button class="btn primary" data-act="saveCafe">Save settings</button><button class="btn" data-act="useLocation">Use my location</button></div></div>' +
+    lateSettingsBlock() +
     '<div style="margin-top:22px;padding-top:16px;border-top:1px solid var(--line)"><div class="small" style="margin-bottom:8px">Want to start again with the sample cafe? This replaces the team, sales, leave, rosters and chat with fresh sample data.</div><button class="btn danger" data-act="resetSample">Replace everything with sample data</button></div>');
 }
 function vTeam() {
   const inactive = state.allStaff.filter(function (p) { return !p.active; });
-  const body = STAFF.length ? '<div class="team">' + STAFF.map(personCard).join('') + '</div>' :
+  const body = STAFF.length ? '<div class="team">' + teamHead() + STAFF.map(personCard).join('') + '</div>' :
     '<div class="empty-state"><b>Your team is empty</b>Add the people who work shifts. Each person signs in with the email you give them.<div style="margin-top:12px"><button class="btn primary" data-act="addStaff">Add a team member</button></div></div>';
   return pageHead('Team', STAFF.length + ' ' + plural(STAFF.length, 'person', 'people') + '. Usual availability and the days each person is happy to be called in at short notice.', '<button class="btn primary" data-act="addStaff">Add team member</button>') + body +
     (inactive.length ? fold('Former team members', inactive.length, inactive.map(function (p) { return '<div class="rowline"><b>' + esc(p.name) + '</b><span>' + esc(p.role) + '</span><button class="btn sm" data-act="restoreStaff" data-id="' + p.id + '" style="margin-left:auto">Add back</button></div>'; }).join('')) : '') +
@@ -652,6 +677,72 @@ function openStaffModal(id) {
     '<div class="acts"><div>' + (id ? '<button class="btn danger" data-act="removeStaff" data-id="' + id + '">Remove</button>' : '') + '</div><div class="head-r"><button class="btn" data-act="closeModal">Cancel</button><button class="btn primary" data-act="saveStaff">' + (id ? 'Save' : 'Add to team') + '</button></div></div>', 'wide');
 }
 
+
+
+/* ---------- LATE OPT-OUT ALERT (owner only) ----------
+   Information for the owner's judgement. Nothing here changes a roster, messages anyone,
+   or touches anyone's hours. Employees never load this data. */
+function lateData() { return state.lateAlerts || { threshold: 3, window_h: 48, alerts: [] }; }
+function lateList(st) { return lateData().alerts.filter(function (a) { return a.state === st; }); }
+function lateToReview() { return lateList('open').filter(function (a) { return !a.watching; }); }
+function lateFirst(a) { return String(a.staff_name || '').split(' ')[0]; }
+function lateMonth(a) { return MONTH_LONG[Number(String(a.month).slice(5, 7)) - 1]; }
+function lateSentence(a) {
+  const n = a.event_count, w = lateData().window_h;
+  return esc(lateFirst(a)) + ' has opted out of ' + n + ' ' + plural(n, 'shift') + ' with under ' + w + ' hours notice in ' + lateMonth(a) + '. Each one triggered standby.';
+}
+function lateNotice(h) { const n = Math.round(Number(h)); return n < 1 ? 'Under 1 hour notice' : n + ' ' + plural(n, 'hour') + ' notice'; }
+function lateEventRow(e, live) {
+  const cover = e.covered_by_name ? 'Covered by ' + esc(String(e.covered_by_name).split(' ')[0]) : e.covered_via === 'owner' ? 'Marked as covered by you' : e.status === 'open' ? 'Not covered yet' : 'No cover recorded';
+  const side = e.excused ? '<span class="chip ok">Excused</span>' : (e.cost != null ? '<b>about ' + money(e.cost) + '</b>' : '');
+  const acts = e.excused ? '<button class="btn sm" data-act="lateUnexcuse" data-id="' + e.id + '">Remove excuse</button>' : '<button class="btn sm" data-act="lateExcuse" data-id="' + e.id + '">Mark event as excused</button>';
+  return '<div class="lev' + (e.excused ? ' excused' : '') + '"><div class="lev-main"><b>' + dLabel(e.day) + ', ' + hRange(e.start_h, e.end_h) + '</b>' +
+    '<span>' + lateNotice(e.notice_hours) + ' · ' + cover + (e.by_owner ? ' · recorded by you' : '') + (e.cost != null && !e.excused ? ' · ' + e.cover_hours + ' h cover' : '') + '</span>' +
+    (e.reason ? '<span class="lev-q">Reason given: ' + esc(e.reason) + '</span>' : '') +
+    (e.note ? '<span class="lev-q">' + (e.excused ? 'Excused: ' : 'Your note: ') + esc(e.note) + '</span>' : (e.excused && e.excused_by ? '<span class="lev-q">Excused by ' + esc(e.excused_by) + '</span>' : '')) + '</div>' +
+    (side ? '<div class="lev-side">' + side + '</div>' : '') +
+    (live !== 'none' ? '<div class="lev-acts">' + acts + '<button class="btn sm" data-act="lateNote" data-id="' + e.id + '">' + (e.note ? 'Edit note' : 'Add a note') + '</button></div>' : '') + '</div>';
+}
+function lateCard(a) {
+  const open = a.state === 'open', ev = a.events || [], counted = ev.filter(function (e) { return !e.excused; }), costed = counted.filter(function (e) { return e.cost != null; });
+  const total = costed.reduce(function (s, e) { return s + Number(e.cost); }, 0), th = lateData().threshold;
+  const cost = costed.length ? '<div class="late-total"><div><span>Estimated cost of cover (an estimate, not a payroll figure)</span><b>about ' + money(total) + '</b></div><p class="small">Each cover shift\'s hours multiplied by the pay rate of the person who worked it, across ' + costed.length + ' ' + plural(costed.length, 'event') + '.' +
+    (costed.length < counted.length ? ' ' + (counted.length - costed.length) + ' ' + plural(counted.length - costed.length, 'event has', 'events have') + ' no cover recorded yet, so ' + (counted.length - costed.length === 1 ? 'it is' : 'they are') + ' left out.' : '') + '</p></div>' : '';
+  const status = open ? (a.watching ? '<span class="chip line">Watching</span>' : '<span class="chip warn">To review</span>') :
+    a.state === 'dismissed' ? '<span class="chip line">Dismissed</span>' : '<span class="chip ok">Closed</span>';
+  const foot = open ? '<div class="actions"><button class="btn" data-act="lateWatch" data-id="' + a.id + '"' + (a.watching ? ' disabled' : '') + '>' + (a.watching ? 'Watching' : 'Keep watching') + '</button><button class="btn" data-act="lateDismiss" data-id="' + a.id + '">Dismiss alert</button></div>' :
+    '<p class="small">' + (a.state === 'dismissed' ? 'Dismissed by ' + esc(a.dismissed_by_name || 'the owner') + (a.dismissed_on ? ' on ' + dLabel(a.dismissed_on) : '') + '.' :
+      'Closed automatically. After excusing events the count is ' + a.event_count + ', below the alert level of ' + th + '. Remove an excuse to bring it back.') + '</p>';
+  return '<section class="panel latecard" data-late="' + a.id + '"><div class="panel-h"><div><h2>Late opt-outs: ' + esc(lateFirst(a)) + ' · ' + lateMonth(a) + '</h2><p>' + (open ? lateSentence(a) : esc(lateFirst(a)) + ' opted out of ' + ev.length + ' ' + plural(ev.length, 'shift') + ' at short notice in ' + lateMonth(a) + (counted.length !== ev.length ? ' (' + counted.length + ' counted, ' + (ev.length - counted.length) + ' excused).' : '.')) + '</p></div>' + status + '</div>' +
+    '<div class="levs">' + ev.map(function (e) { return lateEventRow(e); }).join('') + '</div>' + cost +
+    '<p class="late-judge">This is a flag for your judgement, not a decision. Check the reason with the employee before acting.</p>' + foot + '</section>';
+}
+function lateSection() {
+  if (!state.lateAlerts) return '';
+  const open = lateList('open'), past = state.lateAlerts.alerts.filter(function (a) { return a.state !== 'open'; });
+  return open.map(lateCard).join('') + (past.length ? fold('Earlier late opt-out alerts', past.length, past.map(lateCard).join('')) : '');
+}
+function lateSettingsBlock() {
+  if (!state.lateAlerts) return '<div style="margin-top:22px;padding-top:16px;border-top:1px solid var(--line)"><div class="small">The late opt-out alert needs the latest database file. Run <b>schema.sql</b> in Supabase again to turn it on.</div></div>';
+  const d = state.lateAlerts;
+  return '<div style="margin-top:22px;padding-top:16px;border-top:1px solid var(--line)"><h3 style="margin-bottom:6px">Late opt-out alert</h3>' +
+    '<p class="small" style="margin-bottom:12px">Flags to you, and only you, when one person keeps opting out at short notice, because each one sends a shift to standby. Counted per person, per calendar month. It is a prompt to check in, never a decision.</p>' +
+    '<div class="form"><div class="row"><label>Alert after (opt-outs in a month)<input id="cs-late-n" type="number" min="2" max="20" step="1" value="' + d.threshold + '"></label>' +
+    '<label>Short notice means under (hours)<input id="cs-late-h" type="number" min="1" max="48" step="1" value="' + d.window_h + '"></label></div>' +
+    '<p class="small">Standby only starts within 48 hours, so you can shorten the notice window but not lengthen it.</p>' +
+    '<div class="actions"><button class="btn primary" data-act="saveLateSettings">Save alert settings</button></div></div></div>';
+}
+function openLateSheet(id, mode) {
+  let e = null, a = null;
+  lateData().alerts.forEach(function (x) { (x.events || []).forEach(function (y) { if (y.id === id) { e = y; a = x; } }); });
+  if (!e) { toast('That event could not be found. Reload and try again.', 'bad'); return; }
+  state.modal = { late: id, mode: mode };
+  const th = lateData().threshold, ex = mode === 'excuse';
+  showModal('<div><h2>' + (ex ? 'Mark event as excused' : (e.note ? 'Edit note' : 'Add a note')) + '</h2><p class="muted">' + esc(lateFirst(a)) + ', ' + dLabel(e.day) + ', ' + hRange(e.start_h, e.end_h) + ' · ' + lateNotice(e.notice_hours) + '</p></div>' +
+    '<div class="form">' + (ex ? '<p class="small">Excused events stay in the history but are not counted. If the count drops below ' + th + ', the alert closes by itself.</p>' : '') +
+    '<label>' + (ex ? 'Reason (optional), for example illness' : 'Note, only you can see it') + '<textarea id="late-note" rows="4" maxlength="500">' + esc(e.note || '') + '</textarea></label></div>' +
+    '<div class="acts"><div></div><div class="head-r"><button class="btn" data-act="closeModal">Cancel</button><button class="btn primary" data-act="' + (ex ? 'lateSaveExcuse' : 'lateSaveNote') + '">' + (ex ? 'Mark event as excused' : 'Save note') + '</button></div></div>');
+}
 
 /* ---------- saving to Supabase ---------- */
 function sigOf(q) { return Math.floor(NOW_HOUR * 4) + JSON.stringify(q.map(function (x, i) { return i === 3 ? null : x; })); }
@@ -762,7 +853,9 @@ function parsePos(text) {
 /* ---------- actions ---------- */
 function formVal(id) { const e = $(id); return e ? e.value.trim() : ''; }
 const ACT = {
-  nav: function (t) { state.view = t.dataset.v; render(); toTop(); },
+  nav: function (t) { state.view = t.dataset.v; render(); toTop(); swapAnim(); },
+  rday: function (t) { state.rday = Number(t.dataset.i); render(); },
+  profile: function () { openProfile(); },
   go: function (t) {
     state.view = t.dataset.v;
     if (t.dataset.tab) state.coverTab = t.dataset.tab;
@@ -917,6 +1010,38 @@ const ACT = {
     if (!body) { toast('Type a message first.', 'bad'); return; }
     await SB.rpc('send_chat', { p_body: body });
     await afterChange();
+  },
+  lateExcuse: function (t) { openLateSheet(t.dataset.id, 'excuse'); },
+  lateNote: function (t) { openLateSheet(t.dataset.id, 'note'); },
+  lateSaveNote: async function () {
+    const m = state.modal; if (!m || !m.late) return;
+    await SB.rpc('late_event_note', { p_cover: m.late, p_note: formVal('late-note') });
+    closeModal(); await afterChange(); toast('Note saved.');
+  },
+  lateSaveExcuse: async function () {
+    const m = state.modal; if (!m || !m.late) return;
+    const r = await SB.rpc('late_event_excuse', { p_cover: m.late, p_excused: true, p_note: formVal('late-note') || null });
+    closeModal(); await afterChange();
+    toast(r && r.state === 'closed' ? 'Marked as excused. The count is now below ' + lateData().threshold + ', so the alert has closed.' : 'Marked as excused.');
+  },
+  lateUnexcuse: async function (t) {
+    const r = await SB.rpc('late_event_excuse', { p_cover: t.dataset.id, p_excused: false });
+    await afterChange(); toast(r && r.state === 'open' ? 'Excuse removed. The alert is open again.' : 'Excuse removed.');
+  },
+  lateWatch: async function (t) {
+    await SB.rpc('late_alert_watch', { p_alert: t.dataset.id });
+    await afterChange(); toast('Okay. It stays here and comes back to your home list if there is another late opt-out.');
+  },
+  lateDismiss: async function (t) {
+    await SB.rpc('late_alert_dismiss', { p_alert: t.dataset.id });
+    await afterChange(); toast('Alert dismissed. Your name and the time are in the audit log.');
+  },
+  saveLateSettings: async function () {
+    const n = parseInt(formVal('cs-late-n'), 10), h = parseInt(formVal('cs-late-h'), 10);
+    if (!(n >= 2 && n <= 20)) { toast('Alert after must be between 2 and 20 late opt-outs.', 'bad'); return; }
+    if (!(h >= 1 && h <= 48)) { toast('Short notice must be between 1 and 48 hours.', 'bad'); return; }
+    await SB.rpc('late_save_settings', { p_threshold: n, p_window: h });
+    await afterChange(); toast('Alert settings saved.');
   },
   signOut: function () { return signOutNow(); }
 };

@@ -123,8 +123,8 @@ select t.fails($$select public.cancel_shift((select id from public.shifts where 
 select t.assert((public.cancel_shift((select id from public.shifts where staff_id = t.sid('Maya') and day = '2026-10-16'), 'Unwell', 'Fever')::jsonb ->> 'kind') = 'late', 'inside 48h is a late cancellation');
 select t.fails($$select public.cancel_shift((select id from public.shifts where staff_id = t.sid('Maya') and day = '2026-10-16'), 'x', 'x')$$, 'already cancelled');
 select t.logout();
-select t.assert((select phase from public.cover_requests where kind = 'late') = 'standby', 'late cancel goes to standby');
-select t.assert((select reason from public.cover_requests where kind = 'late') = 'Unwell', 'reason kept for the owner');
+select t.assert((select phase from public.cover_requests where kind = 'late' and staff_id = t.sid('Maya')) = 'standby', 'late cancel goes to standby');
+select t.assert((select reason from public.cover_requests where kind = 'late' and staff_id = t.sid('Maya')) = 'Unwell', 'reason kept for the owner');
 select t.assert((select count(*) from public.chat_messages where cover_id is not null) = 0, 'late cancellation is not posted to the chat');
 
 -- ---------------------------------------------------------------- opting out 48h to 14 days: team chat, normal pay
@@ -144,7 +144,7 @@ select t.fails($$select public.register_open_shift((select id from public.open_s
 select t.logout();
 
 select t.login('zoe@littlewren.example');
-select t.fails($$select public.register_open_shift((select id from public.open_shifts where kind = 'late'))$$, 'moved to Standby');
+select t.fails($$select public.register_open_shift((select id from public.open_shifts where kind = 'late' and staff_id = t.sid('Maya')))$$, 'moved to Standby');
 select public.register_open_shift((select id from public.open_shifts where kind = 'optout'));
 select t.logout();
 select t.assert((select status from public.cover_requests where kind = 'optout') = 'covered', 'opt-out covered');

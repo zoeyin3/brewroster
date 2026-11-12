@@ -11,7 +11,11 @@ function loadScript(src) {
   });
 }
 function root(html) { $('root').innerHTML = html; }
-function brandBlock(sub) { return '<div class="authbrand"><span class="logo">B</span><div><b>Brewroster</b><small>' + (sub || 'Rosters for small cafes') + '</small></div></div>'; }
+// Every screen before sign-in: the brand name, then a plain card.
+function authShell(sub, inner, cls) {
+  return '<div class="authwrap"><div class="hero"><div class="hero-in">' + logo() + '<b class="wordmark">Brewroster</b><span class="tagline">' + (sub || 'Rosters for small cafes') + '</span></div></div>' +
+    '<div class="authcard ' + (cls || '') + '">' + inner + '</div></div>';
+}
 
 /* ---------- configuration ---------- */
 async function readConfig() {
@@ -29,12 +33,12 @@ async function readConfig() {
 
 /* ---------- screens before sign-in ---------- */
 function screenSetup(msg) {
-  root('<div class="authwrap"><div class="authcard">' + brandBlock('Connect your database') +
+  root(authShell('Connect your database',
     '<h1>Connect to Supabase</h1><p>Brewroster keeps everything in your own Supabase project. Paste its details here, or set them as environment variables on Vercel.</p>' +
     (msg ? '<div class="autherr">' + esc(msg) + '</div>' : '') +
     '<form id="setupform" class="form"><label>Project URL<input id="su-url" type="text" placeholder="https://abcdefgh.supabase.co" autocomplete="off"></label><label>Anon (public) key<input id="su-key" type="text" placeholder="eyJ…" autocomplete="off"></label>' +
     '<button class="btn primary" type="submit" style="justify-content:center">Save and continue</button></form>' +
-    '<ol class="steps-l"><li>In Supabase, open <b>Project Settings, API</b>.</li><li>Copy the <b>Project URL</b> and the <b>anon public</b> key.</li><li>Never paste the service_role key.</li></ol></div></div>');
+    '<ol class="steps-l"><li>In Supabase, open <b>Project Settings, API</b>.</li><li>Copy the <b>Project URL</b> and the <b>anon public</b> key.</li><li>Never paste the service_role key.</li></ol>'));
   $('setupform').addEventListener('submit', function (e) {
     e.preventDefault();
     const url = $('su-url').value.trim().replace(/\/+$/, ''), key = $('su-key').value.trim();
@@ -47,12 +51,12 @@ function screenSetup(msg) {
 function screenPortal(note, kind) {
   let last = ''; try { last = localStorage.getItem('brewroster.portal') || ''; } catch (e) { /* ignore */ }
   const tag = function (k) { return last === k ? '<em class="lasttag">Last used</em>' : ''; };
-  root('<div class="authwrap"><div class="authcard wide">' + brandBlock() + '<h1>Welcome</h1><p>Choose how you are signing in.</p>' +
+  root(authShell('Rosters for small cafes', '<h1>Welcome</h1><p>Choose how you are signing in.</p>' +
     (note ? '<div class="' + (kind === 'ok' ? 'authok' : 'autherr') + '" role="alert">' + esc(note) + '</div>' : '') +
     '<div class="portals">' +
-    '<button class="portal" id="pt-employee" type="button"><span class="pt-ic">' + ic('me', 26) + '</span><b>Employee portal' + tag('employee') + '</b><span>See your roster, chat with the team, ask for leave and sign up for standby.</span><i>Continue ›</i></button>' +
-    '<button class="portal" id="pt-owner" type="button"><span class="pt-ic">' + ic('roster', 26) + '</span><b>Owner portal' + tag('owner') + '</b><span>Build the roster, decide leave requests and cover shifts.</span><i>Continue ›</i></button>' +
-    '</div></div></div>');
+    '<button class="portal" id="pt-employee" type="button"><span class="pt-t"><b>Employee' + tag('employee') + '</b><span>Your roster, team chat, leave and standby.</span></span></button>' +
+    '<button class="portal" id="pt-owner" type="button"><span class="pt-t"><b>Owner' + tag('owner') + '</b><span>Build the roster, decide leave and cover shifts.</span></span></button>' +
+    '</div>'));
   $('pt-employee').addEventListener('click', function () { screenAuth('employee', 'in'); });
   $('pt-owner').addEventListener('click', function () { screenAuth('owner', 'in'); });
 }
@@ -72,14 +76,14 @@ async function screenAuth(portal, mode, note, kind) {
   else intro = isOwner && first ? 'No owner account exists yet. Create it now.' : 'Welcome back.';
   const showForm = !(!isOwner && first);
   const sw = canUp ? '<button class="linkbtn" id="au-switch" type="button">' + (up ? 'I already have an account' : (isOwner ? 'Create the owner account' : 'Create an account')) + '</button>' : '';
-  root('<div class="authwrap"><div class="authcard"><button class="linkbtn back" id="au-back" type="button">‹ Choose a different portal</button>' + brandBlock(name) +
+  root(authShell(name, '<button class="linkbtn back" id="au-back" type="button">‹ Back</button>' +
     '<h1>' + (up ? (isOwner ? 'Create the owner account' : 'Create your account') : (isOwner ? 'Owner sign in' : 'Employee sign in')) + '</h1><p>' + intro + '</p>' +
     (note ? '<div class="' + (kind === 'ok' ? 'authok' : 'autherr') + '" id="authnote" role="alert">' + esc(note) + '</div>' : '') +
     (showForm ? '<form id="authform" class="form">' + (up ? '<label>Your name<input id="au-name" type="text" autocomplete="name" required maxlength="60"></label>' : '') +
     '<label>Email<input id="au-email" type="email" autocomplete="email" required></label>' +
     '<label>Password<input id="au-pass" type="password" autocomplete="' + (up ? 'new-password' : 'current-password') + '" required minlength="6"></label>' +
     '<button class="btn primary" type="submit" style="justify-content:center">' + (up ? 'Create account' : 'Sign in') + '</button></form>' : '') +
-    (showForm ? '<div class="authlinks">' + sw + (up ? '' : '<button class="linkbtn" id="au-forgot" type="button">Forgot password?</button>') + '</div>' : '') + '</div></div>');
+    (showForm ? '<div class="authlinks">' + sw + (up ? '' : '<button class="linkbtn" id="au-forgot" type="button">Forgot password?</button>') + '</div>' : '')));
   $('au-back').addEventListener('click', function () { screenPortal(); });
   if ($('au-switch')) $('au-switch').addEventListener('click', function () { screenAuth(portal, up ? 'in' : 'up'); });
   if ($('au-forgot')) $('au-forgot').addEventListener('click', async function () {
@@ -107,24 +111,24 @@ async function screenAuth(portal, mode, note, kind) {
 }
 function screenWaiting() {
   const email = (SB.auth.user() && SB.auth.user().email) || '';
-  root('<div class="authwrap"><div class="authcard">' + brandBlock() + '<h1>Almost there</h1><p>You are signed in as <b>' + esc(email) + '</b>, but that email is not on the team yet. Ask your manager to add it under Team, then check again.</p>' +
-    '<div class="actions"><button class="btn primary" id="w-again">Check again</button><button class="btn" id="w-out">Sign out</button></div></div></div>');
+  root(authShell('Rosters for small cafes', '<h1>Almost there</h1><p>You are signed in as <b>' + esc(email) + '</b>, but that email is not on the team yet. Ask your manager to add it under Team, then check again.</p>' +
+    '<div class="actions"><button class="btn primary" id="w-again">Check again</button><button class="btn" id="w-out">Sign out</button></div>'));
   $('w-again').addEventListener('click', function () { enter(); });
   $('w-out').addEventListener('click', signOutNow);
 }
 function screenProblem(title, text, retry) {
-  root('<div class="authwrap"><div class="authcard">' + brandBlock() + '<h1>' + esc(title) + '</h1><p>' + text + '</p><div class="actions">' + (retry ? '<button class="btn primary" id="p-retry">Try again</button>' : '') + '<button class="btn" id="p-out">Sign out</button></div></div></div>');
+  root(authShell('Rosters for small cafes', '<h1>' + esc(title) + '</h1><p>' + text + '</p><div class="actions">' + (retry ? '<button class="btn primary" id="p-retry">Try again</button>' : '') + '<button class="btn" id="p-out">Sign out</button></div>'));
   if (retry) $('p-retry').addEventListener('click', function () { location.reload(); });
   $('p-out').addEventListener('click', signOutNow);
 }
 function screenOnboard() {
   const tz = (function () { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Australia/Sydney'; } catch (e) { return 'Australia/Sydney'; } })();
-  root('<div class="authwrap"><div class="authcard wide">' + brandBlock('Set up your cafe') +
+  root(authShell('Set up your cafe',
     '<h1>Welcome, ' + esc(firstName()) + '</h1><p>How would you like to start?</p><div class="choices">' +
     '<div class="choice"><h2>Try the sample cafe</h2><p>Little Wren Coffee: ten staff, eight weeks of sales, leave requests waiting for you, and this week\'s roster already uploaded. Staff sign up with the sample emails (for example <code>maya@littlewren.example</code>).</p><button class="btn primary" id="ob-sample">Load sample data</button></div>' +
     '<div class="choice"><h2>Start with my own cafe</h2><p>Enter a few details, then add your team and import your POS sales.</p>' +
     '<div class="form" style="width:100%"><label>Cafe name<input id="ob-name" type="text" maxlength="60" placeholder="My Cafe"></label><label>Time zone<input id="ob-tz" type="text" value="' + esc(tz) + '"></label><button class="btn" id="ob-own">Continue</button></div></div></div>' +
-    '<div class="actions"><button class="linkbtn" id="ob-out">Sign out</button></div></div></div>');
+    '<div class="actions"><button class="linkbtn" id="ob-out">Sign out</button></div>', 'wide'));
   $('ob-out').addEventListener('click', signOutNow);
   $('ob-sample').addEventListener('click', async function (e) {
     const b = e.target; b.disabled = true; b.textContent = 'Setting up…';
@@ -179,7 +183,7 @@ async function mountOwner(q) {
   if (!q) { q = await loadOwnerData(); applyOwnerData(q); }
   state.sig = sigOf(q); state.week = state.week && WEEKS.indexOf(state.week) >= 0 ? state.week : WEEKS[1];
   const initials = String(APP.profile.display_name || 'O').split(/\s+/).map(function (w) { return w[0]; }).join('').slice(0, 2).toUpperCase();
-  root('<div class="app"><aside class="side"><div class="brand"><span class="logo">B</span><div><b>Brewroster</b><small id="cafename"></small></div><span class="rolepill">Owner</span></div><nav class="nav" id="nav" aria-label="Main"></nav>' +
+  root('<div class="app"><aside class="side"><div class="brand">' + logo() + '<div><b>Brewroster</b><small id="cafename"></small></div><button class="avbtn" data-act="profile" aria-label="Account">' + esc(initials) + '</button></div><nav class="nav" id="nav" aria-label="Main"></nav>' +
     '<div class="side-foot"><div class="owner"><span class="avatar">' + esc(initials) + '</span><div>' + esc(APP.profile.display_name || '') + '<small>Owner</small></div></div><button class="btn sm" data-act="signOut">Sign out</button></div></aside>' +
     '<main class="main"><div class="page" id="view"></div></main></div>');
   setCafeName(); render();
@@ -189,7 +193,8 @@ async function mountOwner(q) {
 function setCafeName() { const e = $('cafename'); if (e) e.textContent = (APP.settings && APP.settings.cafe_name) || ''; }
 function mountEmployee() {
   E.tab = 'shifts'; E.weekIdx = 0;
-  root('<div class="eapp"><aside class="eside"><div class="etop"><div class="ebrand"><span class="logo">B</span><div><b id="cafename"></b><small id="who"></small></div></div>' +
+  root('<div class="eapp"><aside class="eside"><div class="etop"><div class="ebrand">' + logo() + '<div><b id="cafename"></b><small id="who"></small></div></div>' +
+    '<button class="avbtn" data-act="profile" aria-label="Account">' + esc(initialsOf((E.me && E.me.name) || APP.profile.display_name || '')) + '</button>' +
     '<div class="efoot"><span class="rolepill">Employee</span><button class="etop-out" data-act="signOut">Sign out</button></div></div>' +
     '<nav class="tabbar" id="tabbar" aria-label="Main"></nav></aside><main class="emain"><div id="view"></div></main></div>');
   $('cafename').textContent = (APP.settings && APP.settings.cafe_name) || 'Brewroster';
