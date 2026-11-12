@@ -15,6 +15,7 @@ Rules enforced in the database (not just the screen):
 - Cancelling a shift more than 48 hours ahead posts it to the team chat. Anyone can register, first come first served, normal pay.
 - Chat shifts nobody has taken by 48 hours out move to Standby.
 - Standby is for day shifts within 48 hours only.
+- **Automatic standby alerts.** When a shift goes to standby (a cancellation under 48 hours, or a chat opt-out that reaches 48 hours unclaimed), everyone who ticked that day, has an account, is free (not on leave or leave pending, not already working, under their weekly hours) is offered it, **one at a time, fairest first**: fewest hours rostered that week, then fewest standby shifts picked up in the last 28 days, then name. The next person is offered it when the current one says No or has not replied in 30 minutes. With under 3 hours to go everyone free is offered it at once and the first Yes wins. Nobody is put on a shift or has hours changed until they say Yes. The owner can turn this off under Team, Cafe settings, and can still alert by hand. Alerts are in-app only (seen when someone opens the app). The 48-hour step runs when someone opens the app, as there is no scheduler. Gaps in the roster itself (not cancellations) are still alerted by hand.
 - **Late opt-out alert (owner only).** When one person opts out of 3 shifts in a calendar month with under 48 hours notice (each one sent to standby), the owner gets a single alert on Home and in Shift cover, with the events, who covered, and an estimated cost. Later events update the same alert. The owner can mark an event as excused (it stops counting; the alert closes if the count falls below 3), add a note, keep watching or dismiss. The threshold and notice window are editable on the Team page. It never contacts, penalises or changes the roster or hours of anyone, and employees cannot see it. Every counted event, excuse and alert action is kept in an audit log (`late_audit`).
 
 ## 1. Create the Supabase project
@@ -61,7 +62,7 @@ Open http://localhost:8080. There is no `/api/config` locally, so use the setup 
 
 ## Good to know
 
-- Standby is a volunteer list (the days someone is happy to be called). It does not need approval; the owner calls from the Cover page.
+- Standby is a volunteer list (the days someone is happy to be called). It does not need approval; alerts go out automatically (or the owner calls from the Cover page if automatic alerts are off).
 - Employees can no longer edit their working hours in the app (the owner does that on the Team page).
 - Screens refresh by polling every 20 seconds. There are no push or email notifications yet.
 - Weather comes from Open-Meteo once a day and falls back to sample values if it cannot be reached. Public events and school terms are entered on the Demand page.

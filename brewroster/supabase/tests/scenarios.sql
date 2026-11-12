@@ -38,6 +38,8 @@ select t.assert((select display_name from public.profiles where email = 'dana@li
 
 select t.login('dana@littlewren.example');
 select public.seed_demo(false);
+-- these scenarios test the owner's manual standby calls, so the automatic alerts are off here (tests/auto_standby.sql covers them)
+update public.settings set auto_standby = false where id = 1;
 select t.fails('select public.seed_demo(false)', 'empty cafe');
 select t.logout();
 

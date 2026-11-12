@@ -309,7 +309,8 @@ function standbyFor(gap, ws, roster, ctx, mode) {
     list.push({ s: s, from: from, to: to, len: len, wk: wk, free: !why, why: why, inWin: !!(av && av[0] <= from && av[1] >= to), cost: len * s.rate });
   });
   list.sort(function (a, b) {
-    return (b.free - a.free) || (gap.bshort > 0 ? (b.s.barista - a.s.barista) : 0) || (b.inWin - a.inWin) || (a.s.rate - b.s.rate);
+    // same order the automatic alerts use: free first, then fewest hours worked that week
+    return (b.free - a.free) || (a.wk - b.wk) || (a.s.name < b.s.name ? -1 : a.s.name > b.s.name ? 1 : 0);
   });
   return list;
 }

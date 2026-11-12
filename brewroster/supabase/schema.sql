@@ -24,6 +24,8 @@ create table if not exists public.settings (
   seeded       boolean not null default false
 );
 insert into public.settings (id) values (1) on conflict (id) do nothing;
+-- when a shift moves to Standby, alert everyone who is free and ticked that day, without the owner having to (owner can turn this off)
+alter table public.settings add column if not exists auto_standby boolean not null default true;
 
 create table if not exists public.staff (
   id          uuid primary key default gen_random_uuid(),
@@ -436,6 +438,55 @@ begin
 end $$;
 
 -- ---- cancelling a shift: employee, or the owner recording a phone call ----
+-- ---- automatic standby alerts ----
+-- When a shift moves to Standby, alert everyone who ticked that weekday, has an account, and is free (the same rules as the
+-- owner's manual list). First yes wins. This only sends the in-app call; it never changes a roster or anyone's hours by itself.
+-- Automatic standby: offer the shift to ONE person at a time, fairest first.
+-- Order: fewest hours rostered that week, then fewest standby shifts picked up in the last 28 days, then name.
+-- The next person is offered it when the current one says No, or has not replied in 30 minutes.
+-- When the shift starts in under 3 hours there is no time to wait, so everyone left who is free is offered it at once.
+create or replace function public._standby_autoalert(p_cover uuid) returns int
+language plpgsql security definer set search_path = public as $$
+declare c public.cover_requests; r record; n int := 0; v_hours numeric; v_urgent boolean;
+begin
+  if (select auto_standby from public.settings where id = 1) is not true then return 0; end if;
+  select * into c from public.cover_requests where id = p_cover;
+  if not found or c.status <> 'open' or c.phase <> 'standby' then return 0; end if;
+  v_hours := extract(epoch from ((c.day::timestamp + make_interval(hours => c.w_from)) - public.cafe_now())) / 3600.0;
+  if extract(epoch from ((c.day::timestamp + make_interval(hours => c.w_to)) - public.cafe_now())) <= 0 then return 0; end if;
+  v_urgent := v_hours < 3;
+  -- a person who has not replied within 30 minutes loses their turn
+  update public.standby_alerts set status = 'expired', responded_at = now()
+   where cover_id = c.id and status = 'sent' and sent_at < now() - interval '30 minutes';
+  -- somebody's turn is still running
+  if not v_urgent and exists (select 1 from public.standby_alerts where cover_id = c.id and status = 'sent') then return 0; end if;
+  for r in
+    select st.id from public.staff st join public.staff_private sp on sp.staff_id = st.id
+     where st.active
+       and sp.standby_days -> (extract(isodow from c.day)::int - 1) = 'true'::jsonb
+       and exists (select 1 from public.profiles p where p.staff_id = st.id)
+       and st.id is distinct from c.staff_id
+       and not exists (select 1 from public.standby_alerts a where a.cover_id = c.id and a.staff_id = st.id)
+       and public.cover_blocker(st.id, c.day, c.w_from, c.w_to) is null
+       and not exists (select 1 from public.leave_requests l where l.staff_id = st.id and l.status = 'pending' and c.day between l.from_day and l.to_day)
+     order by public.week_hours(st.id, (date_trunc('week', c.day::timestamp))::date),
+              (select count(*) from public.shifts x where x.staff_id = st.id and x.via = 'standby' and x.day between public.cafe_today() - 28 and public.cafe_today()),
+              st.name
+  loop
+    insert into public.standby_alerts (cover_id, staff_id, day, from_h, to_h) values (c.id, r.id, c.day, c.w_from, c.w_to) on conflict (cover_id, staff_id) do nothing;
+    if found then n := n + 1; end if;
+    exit when not v_urgent;
+  end loop;
+  return n;
+end $$;
+
+create or replace function public.set_auto_standby(p_on boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_owner() then raise exception 'Only the owner can do that.'; end if;
+  update public.settings set auto_standby = coalesce(p_on, true) where id = 1;
+end $$;
+
 create or replace function public._cancel_shift(p_shift uuid, p_reason text, p_msg text, p_by_owner boolean) returns json
 language plpgsql security definer set search_path = public as $$
 declare s public.shifts; v_up boolean; v_hours numeric; v_days int; v_kind text; v_phase text; v_id uuid; v_name text;
@@ -461,6 +512,8 @@ begin
   end if;
   -- the late opt-out alert is owner-only: nothing about it is returned to the person who opted out
   if v_kind = 'late' then perform public._late_record_event(v_id); end if;
+  -- a shift that goes straight to Standby is offered to the people who are free right away
+  if v_phase = 'standby' then perform public._standby_autoalert(v_id); end if;
   return json_build_object('id', v_id, 'kind', v_kind, 'phase', v_phase);
 end $$;
 
@@ -512,6 +565,7 @@ begin
   select * into c from public.cover_requests where id = a.cover_id for update;
   if not p_accept then
     update public.standby_alerts set status = 'declined', responded_at = now() where id = a.id;
+    if c.status = 'open' then perform public._standby_autoalert(c.id); end if;
     return json_build_object('result', 'declined');
   end if;
   if c.status <> 'open' then
@@ -543,7 +597,12 @@ begin
             for update loop
     update public.cover_requests set phase = 'standby', triggered_standby = true where id = r.id;
     perform public.post_chat('note', 'Nobody registered for ' || public.dlabel(r.day) || ', ' || public.hrange(r.w_from, r.w_to) || '. It is now within 48 hours and has moved to Standby.', r.id);
+    perform public._standby_autoalert(r.id);
     n := n + 1;
+  end loop;
+  -- nobody has replied in time: offer the shift to the next person in line
+  for r in select id from public.cover_requests where status = 'open' and phase = 'standby' loop
+    perform public._standby_autoalert(r.id);
   end loop;
   return n;
 end $$;
@@ -1073,7 +1132,7 @@ grant execute on function
   public.save_roster(date, text, jsonb, jsonb), public.publish_roster(date), public.update_my_availability(jsonb, jsonb),
   public.update_my_standby(jsonb), public.send_chat(text),
   public.late_alerts(), public.late_save_settings(int, int), public.late_event_excuse(uuid, boolean, text), public.late_event_note(uuid, text),
-  public.late_alert_dismiss(uuid), public.late_alert_watch(uuid),
+  public.late_alert_dismiss(uuid), public.late_alert_watch(uuid), public.set_auto_standby(boolean),
   public.seed_demo(boolean)
 to authenticated;
 -- the helpers below are used inside row level security policies, which run as the signed-in user

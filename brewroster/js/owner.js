@@ -76,6 +76,7 @@ function openChat() { return openAll().filter(function (l) { return l.phase === 
 
 function gapFromLate(l, imp) { return { date: l.date, from: l.shift[0], to: l.shift[1], short: imp.shortfall, bshort: imp.bshortHours > 0 ? 1 : 0, lost: imp.lost, key: 'C' + l.id, lateId: l.id }; }
 
+function autoStandbyOn() { return !!(APP.settings && APP.settings.auto_standby === true); }
 function gapKey(g) { return g.key || 'G' + g.date + '-' + g.from; }
 
 function rosterGaps(ws) {
@@ -172,7 +173,7 @@ function vHome() {
     rows.push({ n: nl, tone: 'warn', t: plural(nl, 'leave request') + ' to decide', s: 'Rosters are only built once leave is decided. Waiting: week of ' + weeks.join(' and ') + '.', b: 'Review leave', go: ['leave'] });
   }
   const sb = openLate().length + standbyGaps().length;
-  if (sb) rows.push({ n: sb, tone: 'bad', t: plural(sb, 'shift needs', 'shifts need') + ' cover in the next 48 hours', s: 'Standby staff are listed for each one.', b: 'Find cover', go: ['cover', 'standby'] });
+  if (sb) rows.push({ n: sb, tone: 'bad', t: plural(sb, 'shift needs', 'shifts need') + ' cover in the next 48 hours', s: autoStandbyOn() ? 'Standby staff were alerted automatically. Check who has replied.' : 'Standby staff are listed for each one.', b: 'Find cover', go: ['cover', 'standby'] });
   lateToReview().forEach(function (al) {
     rows.push({ n: al.event_count, tone: 'warn', t: 'Late opt-out alert: ' + esc(lateFirst(al)), s: lateSentence(al), b: 'Review', go: ['cover', 'standby'] });
   });
@@ -478,10 +479,13 @@ function doneRows(via) {
 function candRows(gap, ws, r, c) {
   const cands = standbyFor(gap, ws, r, c), gk = gapKey(gap);
   const free = cands.filter(function (x) { return x.free; }), off = cands.filter(function (x) { return !x.free; });
+  // when somebody has been asked and has not replied, the people after them are simply in line
+  let lineNext = !free.some(function (x) { const al = state.alerts[gk + '|' + x.s.id]; return al && al.status === 'sent'; });
   const rows = free.map(function (x) {
     const key = gk + '|' + x.s.id, al = state.alerts[key];
     let act;
-    if (!al) act = '<button class="btn sm" data-act="alert" data-key="' + key + '">Send alert</button>';
+    if (!al && autoStandbyOn() && /^C/.test(gk) && state.linked[x.s.id]) { act = '<span class="chip line">' + (lineNext ? 'Next in line' : 'In line') + '</span>'; lineNext = false; }
+    else if (!al) act = '<button class="btn sm" data-act="alert" data-key="' + key + '">Send alert</button>';
     else if (al.status === 'sent') act = '<span class="chip warn"><span class="spin"></span> Waiting</span>';
     else if (al.status === 'declined') act = '<span class="chip bad">Cannot make it</span>';
     else if (al.status === 'accepted') act = '<span class="chip ok">Accepted</span>';
@@ -585,7 +589,10 @@ function standbyTab() {
   }).join('');
   const log = state.log.length ? '<section class="panel"><h2 style="margin-bottom:10px">Recent replies</h2><ul class="log">' + state.log.slice(0, 4).map(function (l) { return '<li><span class="chip ' + (l.ok === null ? 'line' : l.ok ? 'ok' : 'bad') + '">' + (l.ok === null ? 'Not needed' : l.ok ? 'Accepted' : 'Declined') + '</span><span>' + esc(l.text) + '</span></li>'; }).join('') + '</ul></section>' : '';
   const n = opens.length + gaps.length;
-  return '<p class="note" style="margin-top:0">Standby is for day shifts starting within 48 hours (before ' + dLabel(addDays(TODAY, 2)) + ', ' + clockText() + '). You see everyone who is happy to work that day and who is free. Each alert reaches the person in their Brewroster app.</p>' +
+  const how = autoStandbyOn()
+    ? 'Standby alerts go out <b>automatically</b>, one person at a time. When a shift is cancelled within 48 hours, or an opt-out in the team chat goes unclaimed for that long, the person who is free and has worked the fewest hours that week is asked first. If they say No, or do not reply within 30 minutes, the next person is asked. Under 3 hours before the shift, everyone who is free is asked at once and the first Yes gets it. You do not need to send anything. Gaps in the roster itself are still alerted from here.'
+    : 'Standby is for day shifts starting within 48 hours (before ' + dLabel(addDays(TODAY, 2)) + ', ' + clockText() + '). You see everyone who is happy to work that day and who is free, and send the alerts yourself. You can turn on automatic alerts under Team, Cafe settings.';
+  return '<p class="note" style="margin-top:0">' + how + ' Each alert reaches the person in their Brewroster app (they see it when they open it).</p>' +
     (n ? '<div class="list">' + lateCards + gapCards + '</div>' : '<div class="empty-state"><b>Nothing needs standby cover</b>If someone cancels a shift within 48 hours, it appears here with the people you can call.</div>') + doneRows('standby') + log;
 }
 function vCover() {
@@ -646,6 +653,7 @@ function cafeSettingsFold() {
     '<div class="row"><label>Latitude<input id="cs-lat" type="number" step="0.0001" value="' + (s.lat == null ? '' : s.lat) + '"></label><label>Longitude<input id="cs-lng" type="number" step="0.0001" value="' + (s.lng == null ? '' : s.lng) + '"></label></div>' +
     '<p class="small">Your location is used only to fetch the weather forecast for the Demand forecast.</p>' +
     '<div class="actions"><button class="btn primary" data-act="saveCafe">Save settings</button><button class="btn" data-act="useLocation">Use my location</button></div></div>' +
+    autoStandbyBlock() +
     lateSettingsBlock() +
     '<div style="margin-top:22px;padding-top:16px;border-top:1px solid var(--line)"><div class="small" style="margin-bottom:8px">Want to start again with the sample cafe? This replaces the team, sales, leave, rosters and chat with fresh sample data.</div><button class="btn danger" data-act="resetSample">Replace everything with sample data</button></div>');
 }
@@ -721,6 +729,15 @@ function lateSection() {
   if (!state.lateAlerts) return '';
   const open = lateList('open'), past = state.lateAlerts.alerts.filter(function (a) { return a.state !== 'open'; });
   return open.map(lateCard).join('') + (past.length ? fold('Earlier late opt-out alerts', past.length, past.map(lateCard).join('')) : '');
+}
+function autoStandbyBlock() {
+  const s = APP.settings || {};
+  const box = '<div style="margin-top:22px;padding-top:16px;border-top:1px solid var(--line)"><h3 style="margin-bottom:6px">Standby alerts</h3>';
+  if (!('auto_standby' in s)) return box + '<div class="small">Automatic standby alerts need the latest database file. Run <b>schema.sql</b> in Supabase again to turn them on.</div></div>';
+  const on = s.auto_standby === true;
+  return box + '<p class="small" style="margin-bottom:12px">When a shift goes to standby (a cancellation under 48 hours, or a chat opt-out nobody claimed), ask the person who is free and has worked the fewest hours that week, then the next if they say No or do not reply in 30 minutes. Nobody has to wait for you. They are only asked. Nobody is put on a shift until they say Yes, and no hours or pay change.</p>' +
+    '<label class="check"><input type="checkbox" id="cs-auto" ' + (on ? 'checked' : '') + '> Send standby alerts automatically</label>' +
+    '<div class="actions" style="margin-top:10px"><button class="btn primary" data-act="saveAutoStandby">Save</button></div></div>';
 }
 function lateSettingsBlock() {
   if (!state.lateAlerts) return '<div style="margin-top:22px;padding-top:16px;border-top:1px solid var(--line)"><div class="small">The late opt-out alert needs the latest database file. Run <b>schema.sql</b> in Supabase again to turn it on.</div></div>';
@@ -977,6 +994,12 @@ const ACT = {
     await reload({ pos: false }); render(); setCafeName();
     try { if (await refreshLiveWeather()) await afterChange(); } catch (e) { /* weather is optional */ }
     toast('Cafe settings saved.');
+  },
+  saveAutoStandby: async function () {
+    const on = !!$('cs-auto').checked;
+    try { await SB.rpc('set_auto_standby', { p_on: on }); } catch (e) { toast('Could not save. Run schema.sql in Supabase again, then retry.', 'bad'); return; }
+    await reload({ pos: false }); render();
+    toast(on ? 'Standby alerts will now be sent automatically.' : 'Standby alerts are now sent by you.');
   },
   useLocation: function () {
     if (!navigator.geolocation) { toast('Your browser cannot share a location.', 'bad'); return; }
